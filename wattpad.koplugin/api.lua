@@ -69,6 +69,9 @@ function WattpadAPI.extractStoryId(url)
         return nil, "story URL is required"
     end
 
+    -- Trim whitespace
+    url = url:gsub("^%s+", ""):gsub("%s+$", "")
+
     local story_id = url:match("/story/(%d+)")
     if not story_id then
         return nil, "invalid Wattpad story URL"

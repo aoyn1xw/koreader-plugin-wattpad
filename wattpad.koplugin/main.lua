@@ -199,6 +199,7 @@ function WattpadPlugin:downloadFromUrlFlow()
 end
 
 function WattpadPlugin:init()
+    print("WattpadPlugin: initializing...")
     self.ui.menu:registerToMainMenu(self)
 end
 
