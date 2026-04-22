@@ -49,7 +49,7 @@ local function request(method, url, headers, body)
         req.headers["content-length"] = tostring(#body)
     end
 
-    local ok, status_code, response_headers, status_line = pcall(http.request, req)
+    local ok, res, status_code, response_headers, status_line = pcall(http.request, req)
     if not ok then
         return nil, "request failed"
     end
