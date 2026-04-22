@@ -177,7 +177,9 @@ function WattpadPlugin:downloadFromUrlFlow()
                 payload.chapters = selected_chapters
             end
 
+            print("Wattpad: downloading " .. #payload.chapters .. " chapters...")
             local html = buildStoryHtml(payload)
+            print("Wattpad: HTML payload built, creating EPUB...")
             local filename = sanitizeFilename(payload.title) .. "_" .. os.date("%Y%m%d_%H%M%S") .. ".epub"
             local epub_path = "/tmp/" .. filename
             local source_url = payload.source_url or url
