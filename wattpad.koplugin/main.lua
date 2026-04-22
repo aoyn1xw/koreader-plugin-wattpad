@@ -6,18 +6,32 @@ local api = require("api")
 local ui = require("ui")
 
 local function loadEpubBackend()
-    -- Try the standard plugin path first
-    local ok, backend = pcall(require, "newsdownloader.epubdownloadbackend")
-    if ok then return true, backend end
+    local candidates = {
+        "newsdownloader.epubdownloadbackend",
+        "plugins.newsdownloader.koplugin.epubdownloadbackend",
+        "epubdownloadbackend",
+    }
+    for _, modname in ipairs(candidates) do
+        local ok, backend = pcall(require, modname)
+        if ok and backend then
+            return true, backend
+        end
+    end
 
-    -- Try absolute path pattern (common for some versions)
-    ok, backend = pcall(require, "plugins.newsdownloader.koplugin.epubdownloadbackend")
-    if ok then return true, backend end
+    local extra_paths = {
+        "/mnt/us/koreader/plugins/newsdownloader.koplugin/?.lua",
+        "/mnt/us/koreader/plugins/newsdownloader.koplugin/?/init.lua",
+    }
+    for _, p in ipairs(extra_paths) do
+        if not package.path:find(p, 1, true) then
+            package.path = package.path .. ";" .. p
+        end
+    end
 
-    -- Manually inject newsdownloader into package path and try again
-    package.path = package.path .. ";/mnt/us/koreader/plugins/newsdownloader.koplugin/?.lua"
-    ok, backend = pcall(require, "epubdownloadbackend")
-    if ok then return true, backend end
+    local ok, backend = pcall(require, "epubdownloadbackend")
+    if ok and backend then
+        return true, backend
+    end
 
     return false, nil
 end
@@ -89,7 +103,10 @@ function WattpadPlugin:logout()
     ui.notify(_("Wattpad token cleared."))
 end
 
-local function buildStoryHtml(payload)
+local MAX_HTML_BYTES_PER_EPUB = 1000 * 1024
+local MAX_CHAPTERS_PER_EPUB = 20
+
+local function buildHtmlPrefix(payload)
     local parts = {
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"/><title>",
         payload.title,
@@ -109,13 +126,34 @@ local function buildStoryHtml(payload)
         parts[#parts + 1] = "</p>"
     end
 
-    for _, chapter in ipairs(payload.chapters or {}) do
-        parts[#parts + 1] = string.format("<h2>%s</h2>", chapter.title)
-        parts[#parts + 1] = chapter.html or ""
-    end
+    return parts
+end
 
-    parts[#parts + 1] = "</body></html>"
-    return table.concat(parts)
+local function appendChapter(html_parts, chapter)
+    html_parts[#html_parts + 1] = string.format("<h2>%s</h2>", chapter.title)
+    html_parts[#html_parts + 1] = chapter.html or ""
+end
+
+local function finalizeHtml(html_parts)
+    html_parts[#html_parts + 1] = "</body></html>"
+    return table.concat(html_parts)
+end
+
+local function shouldRotateChunk(chapter_count, chunk_bytes, next_chapter_bytes)
+    if chapter_count <= 0 then
+        return false
+    end
+    if chapter_count >= MAX_CHAPTERS_PER_EPUB then
+        return true
+    end
+    return (chunk_bytes + next_chapter_bytes) > MAX_HTML_BYTES_PER_EPUB
+end
+
+local function buildStoryTitle(base_title, chunk_index)
+    if chunk_index <= 1 then
+        return base_title
+    end
+    return string.format("%s (Part %d)", base_title, chunk_index)
 end
 
 function WattpadPlugin:loginFlow()
@@ -155,51 +193,131 @@ function WattpadPlugin:downloadFromUrlFlow()
         end
 
         local token = self:getToken()
-        local payload, payload_err = api.buildStoryPayload(story_id, token)
-        if payload_err then
-            ui.notify(_("Failed to fetch story: ") .. payload_err)
+        local metadata, metadata_err = api.fetchStoryMetadata(story_id, token)
+        if metadata_err then
+            ui.notify(_("Failed to fetch story: ") .. metadata_err)
             return
         end
-        if type(payload) ~= "table" then
-            ui.notify(_("Failed to fetch story payload."))
+        if type(metadata) ~= "table" then
+            ui.notify(_("Failed to fetch story metadata."))
             return
         end
-        if type(payload.chapters) ~= "table" then
-            payload.chapters = {}
+        if type(metadata.parts) ~= "table" then
+            metadata.parts = {}
         end
 
-        ui.selectChapters(payload.chapters, function(selected_chapters)
-            if selected_chapters == nil then
+        ui.selectChapters(metadata.parts, function(selected_parts)
+            if selected_parts == nil then
                 return
             end
 
-            if #selected_chapters > 0 then
-                payload.chapters = selected_chapters
+            local parts_to_download = selected_parts
+            if #parts_to_download == 0 then
+                parts_to_download = metadata.parts
             end
 
-            print("Wattpad: downloading " .. #payload.chapters .. " chapters...")
-            local html = buildStoryHtml(payload)
-            print("Wattpad: HTML payload built, creating EPUB...")
-            local filename = sanitizeFilename(payload.title) .. "_" .. os.date("%Y%m%d_%H%M%S") .. ".epub"
-            local epub_path = "/tmp/" .. filename
-            local source_url = payload.source_url or url
+            if #parts_to_download == 0 then
+                ui.notify(_("No chapters found for this story."))
+                return
+            end
 
-            local ok = EpubBackend:createEpub(epub_path, html, source_url, true, payload.title, false, nil, nil)
+            local base_title = metadata.title or ("Story " .. tostring(story_id))
+            local filename_prefix = sanitizeFilename(base_title) .. "_" .. os.date("%Y%m%d_%H%M%S")
+            local source_url = api.BASE_URL .. "/story/" .. tostring(metadata.id or story_id)
+            local created_paths = {}
+            local chunk_index = 1
+            local chunk_chapter_count = 0
+            local chunk_bytes = 0
+            local chunk_payload = {
+                title = buildStoryTitle(base_title, chunk_index),
+                description = metadata.description,
+                cover = metadata.cover,
+            }
+            local html_parts = buildHtmlPrefix(chunk_payload)
+
+            local function flushChunk()
+                if chunk_chapter_count == 0 then
+                    return true
+                end
+
+                local html = finalizeHtml(html_parts)
+                local filename = filename_prefix
+                if chunk_index > 1 then
+                    filename = filename .. string.format("_part%02d", chunk_index)
+                end
+                local epub_path = "/tmp/" .. filename .. ".epub"
+                local ok = EpubBackend:createEpub(epub_path, html, source_url, true, chunk_payload.title, false, nil, nil)
+                if not ok then
+                    return false
+                end
+
+                created_paths[#created_paths + 1] = epub_path
+                chunk_index = chunk_index + 1
+                chunk_chapter_count = 0
+                chunk_bytes = 0
+                chunk_payload = {
+                    title = buildStoryTitle(base_title, chunk_index),
+                    description = metadata.description,
+                    cover = metadata.cover,
+                }
+                html_parts = buildHtmlPrefix(chunk_payload)
+                collectgarbage()
+                collectgarbage()
+                return true
+            end
+
+            for idx, part in ipairs(parts_to_download) do
+                local chapter_html, chapter_err = api.fetchChapterHtml(part.id, token)
+                if chapter_err then
+                    ui.notify(_("Failed to fetch chapter ") .. tostring(idx) .. ": " .. chapter_err)
+                    return
+                end
+
+                local chapter = {
+                    title = part.title or ("Chapter " .. tostring(idx)),
+                    html = chapter_html,
+                }
+                local chapter_block_size = #(chapter.html or "") + #(chapter.title or "") + 64
+                if shouldRotateChunk(chunk_chapter_count, chunk_bytes, chapter_block_size) then
+                    local ok = flushChunk()
+                    if not ok then
+                        ui.notify(_("EPUB creation failed."))
+                        return
+                    end
+                end
+
+                appendChapter(html_parts, chapter)
+                chunk_chapter_count = chunk_chapter_count + 1
+                chunk_bytes = chunk_bytes + chapter_block_size
+                chapter.html = nil
+                collectgarbage()
+            end
+
+            local ok = flushChunk()
             if not ok then
                 ui.notify(_("EPUB creation failed."))
                 return
             end
 
-            ui.notify(_("Saved EPUB: ") .. epub_path)
-            if not openDocument(epub_path) then
+            if #created_paths == 0 then
+                ui.notify(_("No EPUB was created."))
+                return
+            end
+
+            if #created_paths == 1 then
+                ui.notify(_("Saved EPUB: ") .. created_paths[1])
+            else
+                ui.notify(_("Saved ") .. tostring(#created_paths) .. _(" EPUB parts. First file: ") .. created_paths[1])
+            end
+
+            if not openDocument(created_paths[1]) then
                 UIManager:show(InfoMessage:new({
-                    text = _("EPUB created but could not auto-open.\nPath: ") .. epub_path,
+                    text = _("EPUB created but could not auto-open.\nPath: ") .. created_paths[1],
                 }))
             end
         end)
     end)
 end
-
 function WattpadPlugin:init()
     print("WattpadPlugin: initializing...")
     self.ui.menu:registerToMainMenu(self)

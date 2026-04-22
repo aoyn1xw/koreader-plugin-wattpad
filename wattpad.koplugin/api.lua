@@ -6,7 +6,8 @@ local socket_url = require("socket.url")
 local WattpadAPI = {
     BASE_URL = "https://www.wattpad.com",
     USER_AGENT = "Wattpad/com.wattpad.Wattpad (10.9.0; iOS 16.0; iPhone14,2; en_US)",
-    PAGE_LIMIT = 500,
+    PAGE_LIMIT = 200,
+    CHAPTER_MAX_BYTES = 768 * 1024,
 }
 
 local function decodeJson(raw)
@@ -184,17 +185,22 @@ function WattpadAPI.fetchStoryMetadata(story_id, token)
     }, nil
 end
 
-function WattpadAPI.fetchChapterHtml(part_id, token)
+function WattpadAPI.fetchChapterHtml(part_id, token, options)
     if not part_id or part_id == "" then
         return nil, "part_id is required"
     end
+
+    options = options or {}
+    local page_limit = tonumber(options.page_limit) or WattpadAPI.PAGE_LIMIT
+    local max_bytes = tonumber(options.max_bytes) or WattpadAPI.CHAPTER_MAX_BYTES
 
     local zlib = nil
     pcall(function() zlib = require("ffi/zlib") end)
 
     local pages = {}
+    local total_bytes = 0
 
-    for page = 1, WattpadAPI.PAGE_LIMIT do
+    for page = 1, page_limit do
         local url = string.format("%s/apiv2/storytext?id=%s&page=%d", WattpadAPI.BASE_URL, socket_url.escape(tostring(part_id)), page)
         local response, req_err = request("GET", url, buildAuthHeaders(token), nil)
         if req_err then
@@ -219,10 +225,14 @@ function WattpadAPI.fetchChapterHtml(part_id, token)
         end
 
         -- Wattpad apiv2/storytext returns raw HTML or text, not JSON
+        total_bytes = total_bytes + #content
+        if total_bytes > max_bytes then
+            return nil, "chapter is too large for this device memory budget"
+        end
         pages[#pages + 1] = content
     end
 
-    if #pages == WattpadAPI.PAGE_LIMIT then
+    if #pages == page_limit then
         return nil, "chapter pagination limit reached"
     end
 
