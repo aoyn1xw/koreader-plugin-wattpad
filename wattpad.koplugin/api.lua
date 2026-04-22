@@ -186,6 +186,9 @@ function WattpadAPI.fetchChapterHtml(part_id, token)
         return nil, "part_id is required"
     end
 
+    local zlib = nil
+    pcall(function() zlib = require("ffi/zlib") end)
+
     local pages = {}
 
     for page = 1, WattpadAPI.PAGE_LIMIT do
@@ -197,28 +200,23 @@ function WattpadAPI.fetchChapterHtml(part_id, token)
 
         if not response or response.code ~= 200 then
             local code = response and response.code or "unknown"
-            local data = select(1, decodeJson(response and response.raw or ""))
-            local msg = type(data) == "table" and (data.error_description or data.message) or nil
-            return nil, msg or ("failed to fetch chapter text (HTTP " .. tostring(code) .. ")")
+            return nil, "failed to fetch chapter text (HTTP " .. tostring(code) .. ")"
         end
 
-        local data, json_err = decodeJson(response.raw)
-        if json_err then
-            return nil, json_err
+        local content = response.raw
+        if zlib and response.headers and response.headers["content-encoding"] == "gzip" then
+            local ok, decompressed = pcall(zlib.inflateGzip, content)
+            if ok then
+                content = decompressed
+            end
         end
 
-        local html = nil
-        if type(data) == "table" then
-            html = data.text or data.html or data.body
-        elseif type(data) == "string" then
-            html = data
-        end
-
-        if type(html) ~= "string" or html == "" then
+        if not content or content == "" then
             break
         end
 
-        pages[#pages + 1] = html
+        -- Wattpad apiv2/storytext returns raw HTML or text, not JSON
+        pages[#pages + 1] = content
     end
 
     if #pages == WattpadAPI.PAGE_LIMIT then
