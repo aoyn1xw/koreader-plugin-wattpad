@@ -228,7 +228,7 @@ function WattpadPlugin:addToMainMenu(menu_items)
                 text = _("About"),
                 callback = function()
                     UIManager:show(InfoMessage:new({
-                        text = _("Wattpad downloader for KOReader. Uses newsdownloader EPUB backend."),
+                        text = _("Wattpad downloader for KOReader. Uses newsdownloader EPUB backend.\n\nGitHub: https://github.com/aoyn1xw/koreader-plugin-wattpad\nAuthor: aoyn1xw"),
                     }))
                 end,
             },
