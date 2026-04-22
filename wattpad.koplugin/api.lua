@@ -2,12 +2,14 @@ local http = require("socket.http")
 local ltn12 = require("ltn12")
 local json = require("json")
 local socket_url = require("socket.url")
+local compression = require("compression")
 
 local WattpadAPI = {
     BASE_URL = "https://www.wattpad.com",
     USER_AGENT = "Wattpad/com.wattpad.Wattpad (10.9.0; iOS 16.0; iPhone14,2; en_US)",
     PAGE_LIMIT = 200,
     CHAPTER_MAX_BYTES = 768 * 1024,
+    REQUEST_RETRIES = 3,
 }
 
 local function decodeJson(raw)
@@ -27,6 +29,7 @@ local function buildAuthHeaders(token)
     local headers = {
         ["user-agent"] = WattpadAPI.USER_AGENT,
         ["accept"] = "application/json",
+        ["accept-encoding"] = "identity",
     }
 
     if token and token ~= "" then
@@ -37,32 +40,55 @@ local function buildAuthHeaders(token)
 end
 
 local function request(method, url, headers, body)
-    local response_chunks = {}
-    local req = {
-        method = method,
-        url = url,
-        headers = headers or {},
-        sink = ltn12.sink.table(response_chunks),
-    }
+    local retries = WattpadAPI.REQUEST_RETRIES or 1
+    local last_response = nil
 
-    if body then
-        req.source = ltn12.source.string(body)
-        req.headers["content-length"] = tostring(#body)
+    for attempt = 1, retries do
+        local response_chunks = {}
+        local req = {
+            method = method,
+            url = url,
+            headers = headers or {},
+            sink = ltn12.sink.table(response_chunks),
+        }
+
+        if body then
+            req.source = ltn12.source.string(body)
+            req.headers["content-length"] = tostring(#body)
+        end
+
+        local ok, res, status_code, response_headers, status_line = pcall(http.request, req)
+        if not ok then
+            if attempt == retries then
+                return nil, "request failed"
+            end
+        else
+            local code = tonumber(status_code)
+            local raw = table.concat(response_chunks)
+            local is_gzip = (response_headers and response_headers["content-encoding"] == "gzip")
+                or compression.isGzip(raw)
+            if is_gzip then
+                local inflated, inflate_err = compression.gunzip(raw)
+                if not inflated then
+                    return nil, inflate_err or "failed to decompress gzip response"
+                end
+                raw = inflated
+            end
+            local response = {
+                code = code,
+                headers = response_headers,
+                status = status_line,
+                raw = raw,
+            }
+            last_response = response
+
+            if code ~= 429 and code ~= 500 and code ~= 502 and code ~= 503 and code ~= 504 then
+                return response, nil
+            end
+        end
     end
 
-    local ok, res, status_code, response_headers, status_line = pcall(http.request, req)
-    if not ok then
-        return nil, "request failed"
-    end
-
-    local code = tonumber(status_code)
-    local raw = table.concat(response_chunks)
-    return {
-        code = code,
-        headers = response_headers,
-        status = status_line,
-        raw = raw,
-    }, nil
+    return last_response, nil
 end
 
 function WattpadAPI.extractStoryId(url)
@@ -96,6 +122,7 @@ function WattpadAPI.authenticate(username, password)
         ["content-type"] = "application/json",
         ["accept"] = "application/json",
         ["user-agent"] = WattpadAPI.USER_AGENT,
+        ["accept-encoding"] = "identity",
     }
 
     local response, req_err = request("POST", url, headers, payload)
@@ -194,9 +221,6 @@ function WattpadAPI.fetchChapterHtml(part_id, token, options)
     local page_limit = tonumber(options.page_limit) or WattpadAPI.PAGE_LIMIT
     local max_bytes = tonumber(options.max_bytes) or WattpadAPI.CHAPTER_MAX_BYTES
 
-    local zlib = nil
-    pcall(function() zlib = require("ffi/zlib") end)
-
     local pages = {}
     local total_bytes = 0
 
@@ -213,12 +237,6 @@ function WattpadAPI.fetchChapterHtml(part_id, token, options)
         end
 
         local content = response.raw
-        if zlib and response.headers and response.headers["content-encoding"] == "gzip" then
-            local ok, decompressed = pcall(zlib.inflateGzip, content)
-            if ok then
-                content = decompressed
-            end
-        end
 
         if not content or content == "" then
             break
