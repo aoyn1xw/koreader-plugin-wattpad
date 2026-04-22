@@ -267,6 +267,7 @@ function WattpadPlugin:downloadFromUrlFlow()
             end
 
             for idx, part in ipairs(parts_to_download) do
+                ui.showProgress(_("Downloading chapters"), idx, #parts_to_download)
                 local chapter_html, chapter_err = api.fetchChapterHtml(part.id, token)
                 if chapter_err then
                     ui.notify(_("Failed to fetch chapter ") .. tostring(idx) .. ": " .. chapter_err)

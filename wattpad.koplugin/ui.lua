@@ -1,6 +1,7 @@
 local InputDialog = require("ui/widget/inputdialog")
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
+local Notification = require("ui/widget/notification")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 
@@ -12,6 +13,37 @@ end
 
 function UI.notify(text)
     showInfo(text)
+end
+
+local function buildProgressBar(current, total, width)
+    width = width or 20
+    if total <= 0 then
+        total = 1
+    end
+    if current < 0 then
+        current = 0
+    end
+    if current > total then
+        current = total
+    end
+    local ratio = current / total
+    local filled = math.floor(ratio * width + 0.5)
+    if filled < 0 then
+        filled = 0
+    end
+    if filled > width then
+        filled = width
+    end
+    return string.rep("#", filled) .. string.rep("-", width - filled), math.floor(ratio * 100 + 0.5)
+end
+
+function UI.showProgress(label, current, total)
+    local bar, percent = buildProgressBar(current, total, 18)
+    local text = string.format("%s [%s] %d%% (%d/%d)", label or _("Progress"), bar, percent, current, total)
+    UIManager:show(Notification:new({
+        text = text,
+        timeout = 1,
+    }))
 end
 
 function UI.promptStoryUrl(on_submit)
