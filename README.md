@@ -1,6 +1,7 @@
-# koreader-plugin-wattpad
+# koreader-plugin-wattpad [WIP]
 
 KOReader plugin to download Wattpad stories as EPUB on a jailbroken Kindle.
+this is stil wip so expect bugs or error
 
 ## Plugin Layout
 
@@ -32,10 +33,3 @@ KOReader plugin to download Wattpad stories as EPUB on a jailbroken Kindle.
 	plugins/newsdownloader.koplugin/epubdownloadbackend.lua
 - API networking is in wattpad.koplugin/api.lua and can be tested independently from UI.
 
-## CI
-
-This repository includes a GitHub Actions workflow:
-
-- .github/workflows/lua-ci.yml
-
-It runs Lua 5.1 + luacheck on every push and pull request to main.
